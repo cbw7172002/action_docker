@@ -1,0 +1,82 @@
+name: Build Multi Stage Docker Image  # 用于构建多阶段Docker镜像，并将其推送到GitHub容器注册表（GHCR.io）。工作流在代码被推送到除dependabot/**以外的分支时触发，或者在每天5点定时触发。
+
+on:  # 定义触发工作流的事件
+  push:  # 当代码被推送时触发
+    branches-ignore:  # 忽略以下分支
+      - 'dependabot/**'  # 忽略所有dependabot的分支
+  schedule:  # 定时触发
+    - cron: '0 5 * * *'  # 每天5点执行（cron表达式）
+
+jobs:  # 定义工作流中的各个任务
+  GHRC:  # 任务名称：GHRC（GitHub Registry Container）
+
+    runs-on: ubuntu-latest  # 指定任务在Ubuntu的最新版本上运行
+
+    steps:  # 定义任务中的各个步骤
+      - name: Checkout  # 步骤名称：检出代码
+        uses: actions/checkout@v2.3.4  # 使用actions/checkout@v2.3.4操作来检出代码
+
+      - uses: FranzDiebold/github-env-vars-action@v2.3.0  # 使用FranzDiebold/github-env-vars-action@v2.3.0操作来设置环境变量
+      - name: Print environment variables  # 步骤名称：打印环境变量
+        run: |  # 使用run来执行shell命令
+          echo "CI_REPOSITORY_NAME=$CI_REPOSITORY_NAME"  # 打印CI_REPOSITORY_NAME环境变量
+
+      - name: Prepare GHRC.io  # 步骤名称：准备GHRC.io
+        id: prep  # 步骤标识符：prep
+        run: |  # 使用run来执行shell命令
+          REPO=$CI_REPOSITORY_NAME  # 设置REPO变量为CI_REPOSITORY_NAME环境变量的值
+          OWNER="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"  # 设置OWNER变量，将仓库所有者转换为小写
+          DOCKER_IMAGE=${OWNER}/${REPO}  # 设置DOCKER_IMAGE变量为仓库所有者和仓库名的组合
+          # 根据CI_REF_NAME环境变量的值设置VERSION变量
+          if [ "$CI_REF_NAME" == "master" ];then VERSION=latest;fi
+          if [ "$CI_REF_NAME" == "dev" ];then VERSION=mightly;fi
+          if [ "$CI_REF_NAME" == "dockserver" ];then VERSION=dockserver;fi
+          TAGS="${DOCKER_IMAGE}:${VERSION}"  # 设置TAGS变量为镜像名称和版本标签的组合
+          # 设置输出变量tags、title、version和created
+          echo ::set-output name=tags::${TAGS}
+          echo ::set-output name=title::${GITHUB_REPOSITORY}
+          echo ::set-output name=version::${VERSION}
+          echo ::set-output name=created::$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+
+      - name: Set up QEMU  # 步骤名称：设置QEMU
+        uses: docker/setup-qemu-action@v1  # 使用docker/setup-qemu-action@v1操作来设置QEMU
+        with:
+          platforms: linux/amd64,linux/armhf,linux/arm64  # 指定支持的平台
+
+      - name: Set up Docker Buildx  # 步骤名称：设置Docker Buildx
+        id: buildx  # 步骤标识符：buildx
+        uses: docker/setup-buildx-action@v1.3.0  # 使用docker/setup-buildx-action@v1.3.0操作来设置Docker Buildx
+
+      - name: Cache Docker layers  # 步骤名称：缓存Docker层
+        uses: actions/cache@v2.1.6  # 使用actions/cache@v2.1.6操作来缓存Docker层
+        with:
+          path: /tmp/.buildx-cache  # 缓存路径
+          key: ${{ runner.os }}-buildx-${{ github.sha }}  # 缓存键
+          restore-keys: |  # 恢复缓存键
+            ${{ runner.os }}-buildx-  # 恢复缓存的模式
+
+      - name: Login to GitHub Container Registry  # 步骤名称：登录到GitHub容器注册表
+        if: github.event_name != 'pull_request'  # 如果不是pull request事件，则执行
+        uses: docker/login-action@v1.9.0  # 使用docker/login-action@v1.9.0操作来登录
+        with:
+          registry: ghcr.io  # 指定注册表为GitHub容器注册表
+          username: ${{ github.repository_owner }}  # 使用仓库所有者作为用户名
+          password: ${{ secrets.CR_PAT }}  # 使用CR_PAT密钥作为密码
+
+      - name: Build and push GHRC.io  # 步骤名称：构建并推送GHRC.io
+        id: docker_build  # 步骤标识符：docker_build
+        uses: docker/build-push-action@v2.5.0  # 使用docker/build-push-action@v2.5.0操作来构建并推送Docker镜像
+        with:
+          builder: ${{ steps.buildx.outputs.name }}  # 使用步骤buildx的输出作为构建器
+          context: .  # 构建上下文
+          file: ./Dockerfile  # Dockerfile路径
+          platforms: linux/amd64,linux/armhf,linux/arm64  # 指定支持的平台
+          push: ${{ github.event_name != 'pull_request' }}  # 如果不是pull request事件，则推送镜像
+          tags: ghcr.io/${{ steps.prep.outputs.tags }}  # 设置镜像标签
+          labels: |  # 设置镜像标签
+            org.opencontainers.image.title=${{ steps.prep.outputs.title }}
+            org.opencontainers.image.version=${{ steps.prep.outputs.version }}
+            org.opencontainers.image.created=${{ steps.prep.outputs.created }}
+
+      - name: Image digest  # 步骤名称：镜像摘要
+        run: echo ${{ steps.docker_build.outputs.digest }}  # 打印镜像摘要
